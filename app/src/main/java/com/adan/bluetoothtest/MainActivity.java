@@ -2,9 +2,9 @@ package com.adan.bluetoothtest;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import android.Manifest;
@@ -32,6 +32,7 @@ import com.adan.bluetoothtest.databinding.ActivityMainBinding;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.UUID;
@@ -39,12 +40,14 @@ import java.util.UUID;
 public class MainActivity extends AppCompatActivity {
     private ActivityMainBinding binding;
     private BluetoothAdapter bluetoothAdapter;
-    private ArrayList<String> discoveredDevicesList = new ArrayList<>();
+    private final ArrayList<String> discoveredDevicesList = new ArrayList<>();
     private ArrayAdapter<String> listAdapter;
 
     private ConnectThread connectThread;
     private ConnectedThread connectedThread;
-    private long scanStartTime;  // 新增变量：记录扫描开始时间
+    private long scanStartTime;
+    private String connectedDeviceAddress = null;
+
     private static final String TAG = "MainActivityBluetooth";
     private static final UUID MY_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
@@ -84,10 +87,9 @@ public class MainActivity extends AppCompatActivity {
                         break;
                     }
                 }
-
                 if (allGranted) {
                     Toast.makeText(this, "权限已授予", Toast.LENGTH_SHORT).show();
-                    initializeBluetoothAndScan(); // 权限授予后，初始化并扫描
+                    initializeBluetoothAndScan();
                 } else {
                     Toast.makeText(this, "权限被拒绝。蓝牙功能将受限。", Toast.LENGTH_LONG).show();
                 }
@@ -101,19 +103,24 @@ public class MainActivity extends AppCompatActivity {
 
         handler = new Handler(Looper.getMainLooper()) {
             @Override
-            public void handleMessage(Message msg) {
+            public void handleMessage(@NonNull Message msg) {
                 switch (msg.what) {
                     case MessageConstants.MESSAGE_STATE_CHANGE:
                         String deviceNameForToast = (String) msg.obj;
                         switch (msg.arg1) {
                             case ConnectionState.STATE_CONNECTED:
                                 Toast.makeText(MainActivity.this, "已连接到 " + deviceNameForToast, Toast.LENGTH_SHORT).show();
+                                refreshDeviceListWithStatus();
                                 break;
                             case ConnectionState.STATE_CONNECTING:
                                 Toast.makeText(MainActivity.this, "正在连接 " + deviceNameForToast + "...", Toast.LENGTH_SHORT).show();
+                                connectedDeviceAddress = null;
+                                refreshDeviceListWithStatus();
                                 break;
                             case ConnectionState.STATE_NONE:
-                                Toast.makeText(MainActivity.this, "未连接", Toast.LENGTH_SHORT).show();
+                                Toast.makeText(MainActivity.this, deviceNameForToast != null ? deviceNameForToast : "未连接", Toast.LENGTH_SHORT).show();
+                                connectedDeviceAddress = null;
+                                refreshDeviceListWithStatus();
                                 break;
                         }
                         break;
@@ -138,54 +145,64 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
 
-            String deviceInfo = (String) parent.getItemAtPosition(position);
-            if (deviceInfo.startsWith("---")) return;  // 跳过无效项 (Skip invalid items)
+            String fullDeviceInfo = (String) parent.getItemAtPosition(position);
+            if (fullDeviceInfo.startsWith("---") || fullDeviceInfo.equals("无已配对设备") || fullDeviceInfo.equals("未发现新设备")) {
+                return;
+            }
 
-            String deviceAddress = deviceInfo.substring(deviceInfo.lastIndexOf("\n") + 1);
+            String deviceAddress = fullDeviceInfo.substring(fullDeviceInfo.lastIndexOf("\n") + 1);
             BluetoothDevice device = bluetoothAdapter.getRemoteDevice(deviceAddress);
-            String dialogDeviceName = deviceInfo.substring(0, deviceInfo.indexOf("\n")); // 从列表项获取名称用于弹窗 (Get name from list item for dialog)
 
-            // 检查扫描权限以在连接前停止扫描 (Check scan permission to stop discovery before connecting)
-            if (ActivityCompat.checkSelfPermission(this, getBluetoothScanPermission()) == PackageManager.PERMISSION_GRANTED) {
+            String displayNameFromList = fullDeviceInfo.substring(0, fullDeviceInfo.indexOf("\n"));
+            displayNameFromList = displayNameFromList.replace(" (已连接)", "").replace(" (未连接)", "").replace(" (已配对)", "").replace(" (扫描)", "");
+
+            if (checkPermission(getBluetoothScanPermission())) {
                 if (bluetoothAdapter.isDiscovering()) {
                     bluetoothAdapter.cancelDiscovery();
-                    Log.d(TAG, "Discovery cancelled before attempting connection.");
+                    Log.d(TAG, "Discovery cancelled before user interaction.");
                 }
-            } else {
-                Log.w(TAG, "Scan permission missing, cannot cancel discovery. Proceeding with connection attempt.");
             }
 
-
-            // 判断设备是否已连接 (Determine if the device is already connected)
-            boolean isCurrentlyConnected = (connectedThread != null &&
-                    connectedThread.mmSocket != null &&
-                    connectedThread.mmSocket.isConnected() &&
-                    connectedThread.mmSocket.getRemoteDevice().getAddress().equals(deviceAddress));
-
-            if (isCurrentlyConnected) {
-                // 已连接，显示断开连接弹窗 (Connected, show disconnect dialog)
-                new AlertDialog.Builder(this)
-                        .setTitle("断开连接")
-                        .setMessage("是否断开与 " + dialogDeviceName + " 的连接？")
-                        .setPositiveButton("断开", (dialog, which) -> {
-                            if (connectedThread != null) {
-                                connectedThread.cancel();
-                                connectedThread = null;
-                            }
-                            Toast.makeText(this, "已断开连接", Toast.LENGTH_SHORT).show();
-                            updateConnectionState(ConnectionState.STATE_NONE, null);
-                        })
-                        .setNegativeButton("取消", null)
-                        .show();
-            } else {
-                // 未连接，显示连接弹窗 (Not connected, show connect dialog)
-                new AlertDialog.Builder(this)
-                        .setTitle("连接设备")
-                        .setMessage("是否连接到 " + dialogDeviceName + "？")
-                        .setPositiveButton("连接", (dialog, which) -> connectToDevice(device))  // 调用连接方法 (Call connect method)
-                        .setNegativeButton("取消", null)
-                        .show();
+            boolean isCurrentlyConnectedToThisDevice = (connectedDeviceAddress != null && connectedDeviceAddress.equals(deviceAddress));
+            boolean isBonded = false;
+            if (checkPermission(getBluetoothConnectPermission())) {
+                isBonded = device.getBondState() == BluetoothDevice.BOND_BONDED;
             }
+
+            AlertDialog.Builder builder = new AlertDialog.Builder(this);
+            builder.setTitle(displayNameFromList);
+
+            ArrayList<String> dialogOptions = new ArrayList<>();
+            if (isCurrentlyConnectedToThisDevice) {
+                dialogOptions.add("断开连接");
+            } else {
+                dialogOptions.add("连接");
+            }
+            if (isBonded) {
+                dialogOptions.add("取消配对");
+            }
+            dialogOptions.add("取消");
+
+            builder.setItems(dialogOptions.toArray(new String[0]), (dialog, which) -> {
+                String selectedOption = dialogOptions.get(which);
+                switch (selectedOption) {
+                    case "连接":
+                        connectToDevice(device);
+                        break;
+                    case "断开连接":
+                        if (connectedThread != null) {
+                            connectedThread.cancel();
+                        }
+                        break;
+                    case "取消配对":
+                        unpairDevice(device);
+                        break;
+                    case "取消":
+                        dialog.dismiss();
+                        break;
+                }
+            });
+            builder.show();
         });
 
         binding.btnScan.setOnClickListener(v -> {
@@ -204,33 +221,148 @@ public class MainActivity extends AppCompatActivity {
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
         registerReceiver(discoveryReceiver, filter);
 
-        // 首次启动时检查权限并初始化蓝牙 (Check permissions and initialize Bluetooth on first start)
+        IntentFilter bondFilter = new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        registerReceiver(bondStateReceiver, bondFilter);
+
         if (checkAndRequestPermissions()) {
-            initializeBluetooth(); // 仅列出已配对的，不主动扫描 (Only list paired, don't scan actively)
+            initializeBluetooth();
         }
+    }
+
+    /**
+     * 优化 refreshDeviceListWithStatus 方法：
+     * 确保在刷新时，分别独立更新“已配对设备”和“新设备”部分，而不是清空整个列表。
+     * 避免重复清空 discoveredDevicesList，改为分别更新两个部分的设备列表。
+     * <p>
+     * 分离刷新逻辑：
+     * 分别定义 updatePairedDevices 和 updateNewDevices 方法，分别处理已配对设备和新设备的列表更新。
+     * 在 refreshDeviceListWithStatus 中调用这两个方法，确保每次刷新都能保留所有设备。
+     */
+    private void refreshDeviceListWithStatus() {
+        // 备份新设备部分
+        ArrayList<String> newDevices = new ArrayList<>();
+        boolean newDevicesSectionStarted = false;
+        for (String item : discoveredDevicesList) {
+            if (item.equals("--- 新设备 ---")) {
+                newDevicesSectionStarted = true;
+                newDevices.add(item);
+                continue;
+            }
+            if (newDevicesSectionStarted && !item.startsWith("---")) {
+                newDevices.add(item);
+            }
+        }
+
+        // 更新已配对设备部分
+        updatePairedDevices();
+
+        // 恢复新设备部分并更新状态
+        updateNewDevices(newDevices);
+
+        listAdapter.notifyDataSetChanged();
+    }
+
+    // 更新已配对设备部分
+    @SuppressLint("MissingPermission")
+    private void updatePairedDevices() {
+        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
+            Log.w(TAG, "updatePairedDevices: Bluetooth not enabled or adapter null");
+            discoveredDevicesList.clear();
+            discoveredDevicesList.add("--- 已配对设备 ---");
+            discoveredDevicesList.add("无已配对设备");
+            return;
+        }
+
+        if (!checkPermission(getBluetoothConnectPermission())) {
+            Toast.makeText(this, "缺少蓝牙连接权限以列出已配对设备。", Toast.LENGTH_SHORT).show();
+            Log.w(TAG, "updatePairedDevices: BLUETOOTH_CONNECT permission missing.");
+            discoveredDevicesList.clear();
+            discoveredDevicesList.add("--- 已配对设备 ---");
+            discoveredDevicesList.add("无已配对设备");
+            return;
+        }
+
+        // 保留“新设备”部分
+        ArrayList<String> newDevicesSection = new ArrayList<>();
+        boolean newDevicesSectionStarted = false;
+        for (String item : discoveredDevicesList) {
+            if (item.equals("--- 新设备 ---")) {
+                newDevicesSectionStarted = true;
+                newDevicesSection.add(item);
+                continue;
+            }
+            if (newDevicesSectionStarted) {
+                newDevicesSection.add(item);
+            }
+        }
+
+        // 清空列表并重新添加已配对设备
+        discoveredDevicesList.clear();
+        discoveredDevicesList.add("--- 已配对设备 ---");
+
+        Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
+        if (pairedDevices != null && !pairedDevices.isEmpty()) {
+            for (BluetoothDevice device : pairedDevices) {
+                String deviceName = device.getName();
+                String deviceHardwareAddress = device.getAddress();
+                String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(deviceHardwareAddress)) ? " (已连接)" : " (未连接)";
+                String deviceInfo = (deviceName == null || deviceName.isEmpty() ? "未知设备 (已配对)" : deviceName) + status + "\n" + deviceHardwareAddress;
+                discoveredDevicesList.add(deviceInfo);
+            }
+        } else {
+            discoveredDevicesList.add("无已配对设备");
+            Log.d(TAG, "没有已配对的设备");
+        }
+
+        // 恢复“新设备”部分
+        if (!newDevicesSection.isEmpty()) {
+            discoveredDevicesList.addAll(newDevicesSection);
+        }
+    }
+
+    // 更新新设备部分
+    private void updateNewDevices(ArrayList<String> newDevices) {
+        ArrayList<String> updatedNewDevices = new ArrayList<>();
+        updatedNewDevices.add("--- 新设备 ---");
+
+        for (String item : newDevices) {
+            if (item.equals("--- 新设备 ---") || item.equals("未发现新设备")) {
+                continue;
+            }
+            String address = item.substring(item.lastIndexOf("\n") + 1);
+            BluetoothDevice dev = bluetoothAdapter.getRemoteDevice(address);
+            String name = "未知设备";
+            if (checkPermission(getBluetoothConnectPermission())) {
+                name = dev.getName() == null || dev.getName().isEmpty() ? "未知设备" : dev.getName();
+            }
+            String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(address)) ? " (已连接)" : " (未连接)";
+            updatedNewDevices.add(name + status + "\n" + address);
+        }
+
+        if (updatedNewDevices.size() == 1) { // 只有标题，没有设备
+            updatedNewDevices.add("未发现新设备");
+        }
+
+        // 移除旧的“新设备”部分（如果存在），并添加更新后的部分
+        int newDevicesHeaderIndex = discoveredDevicesList.indexOf("--- 新设备 ---");
+        if (newDevicesHeaderIndex != -1) {
+            while (discoveredDevicesList.size() > newDevicesHeaderIndex) {
+                discoveredDevicesList.remove(newDevicesHeaderIndex);
+            }
+        }
+        discoveredDevicesList.addAll(updatedNewDevices);
     }
 
     private boolean checkAndRequestPermissions() {
         ArrayList<String> permissionsToRequest = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN);
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT);
-            }
+            if (!checkPermission(Manifest.permission.BLUETOOTH_SCAN)) permissionsToRequest.add(Manifest.permission.BLUETOOTH_SCAN);
+            if (!checkPermission(Manifest.permission.BLUETOOTH_CONNECT)) permissionsToRequest.add(Manifest.permission.BLUETOOTH_CONNECT);
         } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH);
-            }
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADMIN) != PackageManager.PERMISSION_GRANTED) {
-                permissionsToRequest.add(Manifest.permission.BLUETOOTH_ADMIN);
-            }
+            if (!checkPermission(Manifest.permission.BLUETOOTH)) permissionsToRequest.add(Manifest.permission.BLUETOOTH);
+            if (!checkPermission(Manifest.permission.BLUETOOTH_ADMIN)) permissionsToRequest.add(Manifest.permission.BLUETOOTH_ADMIN);
         }
-        // 定位权限对于发现设备是必要的 (Location permission is necessary for device discovery)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        }
+        if (!checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)) permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION);
 
         if (!permissionsToRequest.isEmpty()) {
             Log.d(TAG, "请求权限: " + permissionsToRequest);
@@ -247,18 +379,16 @@ public class MainActivity extends AppCompatActivity {
             Toast.makeText(this, "设备不支持蓝牙", Toast.LENGTH_SHORT).show();
             return;
         }
-
         if (!bluetoothAdapter.isEnabled()) {
             Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
-            if (ActivityCompat.checkSelfPermission(this, getBluetoothConnectPermission()) != PackageManager.PERMISSION_GRANTED) {
+            if (!checkPermission(getBluetoothConnectPermission())) {
                 Log.w(TAG, "缺少 BLUETOOTH_CONNECT 权限以执行 ACTION_REQUEST_ENABLE。");
-                // 即使缺少权限也尝试启动，系统可能会处理或失败 (Try to launch even if permission is missing, system might handle or fail)
             }
             enableBluetoothLauncher.launch(enableBtIntent);
         } else {
             Log.d(TAG, "蓝牙已启用。正在列出已配对设备并开始扫描...");
-            listPairedDevices(); // 确保已配对设备首先被列出或刷新 (Ensure paired devices are listed or refreshed first)
-            startDiscovery();    // 然后开始扫描新设备 (Then start scanning for new devices)
+            listPairedDevices();
+            startDiscovery();
         }
     }
 
@@ -270,7 +400,7 @@ public class MainActivity extends AppCompatActivity {
         }
         if (!bluetoothAdapter.isEnabled()) {
             Intent enableBtIntent = new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE);
-            if (ActivityCompat.checkSelfPermission(this, getBluetoothConnectPermission()) != PackageManager.PERMISSION_GRANTED) {
+            if (!checkPermission(getBluetoothConnectPermission())) {
                 Log.w(TAG, "缺少 BLUETOOTH_CONNECT 权限以执行 ACTION_REQUEST_ENABLE。");
             }
             enableBluetoothLauncher.launch(enableBtIntent);
@@ -279,90 +409,41 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is checked before calling this method
+    @SuppressLint("MissingPermission")
     private void listPairedDevices() {
-        if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
-            Log.w(TAG, "listPairedDevices: Bluetooth not enabled or adapter null");
-            return;
-        }
-
-        if (!checkPermission(getBluetoothConnectPermission())) {
-            Toast.makeText(this, "缺少蓝牙连接权限以列出已配对设备。", Toast.LENGTH_SHORT).show();
-            Log.w(TAG, "listPairedDevices: BLUETOOTH_CONNECT permission missing.");
-            return;
-        }
-
-        discoveredDevicesList.clear(); // 清空整个列表准备重新填充 (Clear entire list to repopulate)
-        listAdapter.notifyDataSetChanged(); // 更新UI以反映清空 (Update UI to reflect clearing)
-
-        Set<BluetoothDevice> pairedDevices = bluetoothAdapter.getBondedDevices();
-        discoveredDevicesList.add("--- 已配对设备 ---"); // 添加头部 (Add header)
-
-        if (pairedDevices != null && !pairedDevices.isEmpty()) {
-            for (BluetoothDevice device : pairedDevices) {
-                String deviceName = device.getName();
-                String deviceHardwareAddress = device.getAddress();
-                String deviceInfo = (deviceName == null || deviceName.isEmpty() ? "未知设备 (已配对)" : deviceName) + "\n" + deviceHardwareAddress;
-                discoveredDevicesList.add(deviceInfo);
-            }
-        } else {
-            discoveredDevicesList.add("无已配对设备");
-            Log.d(TAG, "没有已配对的设备");
-        }
+        updatePairedDevices();
         listAdapter.notifyDataSetChanged();
     }
 
-    @SuppressLint("MissingPermission") // BLUETOOTH_SCAN and ACCESS_FINE_LOCATION checked before calling
+    @SuppressLint("MissingPermission")
     private void startDiscovery() {
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled()) {
             Log.w(TAG, "startDiscovery: Bluetooth not enabled or adapter null");
             return;
         }
-
         if (!checkPermission(getBluetoothScanPermission()) || !checkPermission(Manifest.permission.ACCESS_FINE_LOCATION)) {
             Toast.makeText(this, "扫描权限缺失。", Toast.LENGTH_SHORT).show();
             Log.w(TAG, "startDiscovery: Scanning permissions missing.");
-            binding.btnScan.setEnabled(true); // 确保按钮可用如果无法启动扫描 (Ensure button is enabled if scan cannot start)
+            binding.btnScan.setEnabled(true);
             return;
         }
 
-        scanStartTime = System.currentTimeMillis(); // 记录扫描开始时间戳 (Record scan start timestamp)
-        binding.btnScan.setEnabled(false); // 禁用扫描按钮 (Disable scan button)
-        Log.d(TAG, "扫描按钮已禁用 (Scan button disabled)");
-
-
-        // 清理之前的“新设备”部分，保留“已配对设备”部分
-        // (Clean up previous "New Devices" section, keep "Paired Devices" section)
-        int newDevicesHeaderIndex = discoveredDevicesList.indexOf("--- 新设备 ---");
-        if (newDevicesHeaderIndex != -1) {
-            // 从 "--- 新设备 ---" 头部开始移除之后的所有项
-            // (Remove all items from the "--- 新设备 ---" header onwards)
-            while (discoveredDevicesList.size() > newDevicesHeaderIndex) {
-                discoveredDevicesList.remove(newDevicesHeaderIndex);
-            }
-        }
-        // 如果列表中没有 "--- 新设备 ---" 头部（可能因为之前没有扫描到新设备），现在添加它
-        // (If "--- 新设备 ---" header isn't in the list (perhaps no new devices found previously), add it now)
-        if(discoveredDevicesList.indexOf("--- 新设备 ---") == -1) { // 确保在取消/开始新扫描时总是有一个新设备区域
-            discoveredDevicesList.add("--- 新设备 ---");
-        }
-        listAdapter.notifyDataSetChanged();
-
+        scanStartTime = System.currentTimeMillis();
+        binding.btnScan.setEnabled(false);
+        Log.d(TAG, "扫描按钮已禁用");
 
         if (bluetoothAdapter.isDiscovering()) {
             bluetoothAdapter.cancelDiscovery();
-            Log.d(TAG, "已取消正在进行的扫描 (Cancelled ongoing discovery)");
+            Log.d(TAG, "已取消正在进行的扫描");
         }
 
         boolean discoveryStarted = bluetoothAdapter.startDiscovery();
         if (discoveryStarted) {
-            Log.d(TAG, "开始扫描新设备... (Started discovery for new devices...)");
-            // "--- 新设备 ---" 头部应该已经存在了 (The "--- 新设备 ---" header should already exist)
+            Log.d(TAG, "开始扫描新设备...");
         } else {
-            Log.e(TAG, "BluetoothAdapter.startDiscovery() 返回 false。请检查权限和适配器状态。(BluetoothAdapter.startDiscovery() returned false. Check permissions and adapter state.)");
+            Log.e(TAG, "BluetoothAdapter.startDiscovery() 返回 false。");
             Toast.makeText(this, "启动发现失败。", Toast.LENGTH_SHORT).show();
-            binding.btnScan.setEnabled(true); // 如果启动失败，重新启用按钮 (If start fails, re-enable button)
+            binding.btnScan.setEnabled(true);
         }
     }
 
@@ -370,9 +451,17 @@ public class MainActivity extends AppCompatActivity {
         return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED;
     }
 
-
+    /**
+     * 添加边界检查：
+     * 在访问 discoveredDevicesList.get(newDevicesHeaderIndex + 1) 之前，添加条件 newDevicesHeaderIndex + 1 < discoveredDevicesList.size()，确保不会越界。
+     * 如果 newDevicesHeaderIndex 是最后一个元素，则跳过移除 "未发现新设备" 的操作，因为此时没有该项。
+     * <p>
+     * 逻辑优化：
+     * 确保 newDevicesHeaderIndex 后的操作更加健壮，避免不必要的列表访问。
+     * 简化了新设备添加的逻辑，减少出错可能性。
+     */
     private final BroadcastReceiver discoveryReceiver = new BroadcastReceiver() {
-        @SuppressLint("MissingPermission") // Permissions are checked before scan or by getBluetoothConnectPermission()
+        @SuppressLint("MissingPermission")
         @Override
         public void onReceive(Context context, Intent intent) {
             String action = intent.getAction();
@@ -387,14 +476,11 @@ public class MainActivity extends AppCompatActivity {
                         String fetchedName = device.getName();
                         if (fetchedName != null && !fetchedName.isEmpty()) {
                             deviceName = fetchedName;
-                        } else {
-                            Log.w(TAG, "ACTION_FOUND: device.getName() returned null/empty with BLUETOOTH_CONNECT. Address: " + deviceHardwareAddress);
                         }
-                    } else {
-                        Log.w(TAG, "ACTION_FOUND: BLUETOOTH_CONNECT permission missing for getName(). Address: " + deviceHardwareAddress);
                     }
 
-                    String deviceInfo = deviceName + "\n" + deviceHardwareAddress;
+                    String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(deviceHardwareAddress)) ? " (已连接)" : " (未连接)";
+                    String deviceInfo = deviceName + status + "\n" + deviceHardwareAddress;
 
                     boolean alreadyExists = false;
                     int existingIndex = -1;
@@ -407,7 +493,7 @@ public class MainActivity extends AppCompatActivity {
                     }
 
                     if (alreadyExists) {
-                        if (discoveredDevicesList.get(existingIndex).startsWith("未知设备") && !deviceName.startsWith("未知设备")) {
+                        if (!discoveredDevicesList.get(existingIndex).equals(deviceInfo)) {
                             discoveredDevicesList.set(existingIndex, deviceInfo);
                             listAdapter.notifyDataSetChanged();
                             Log.d(TAG, "更新设备信息: " + deviceInfo);
@@ -415,13 +501,14 @@ public class MainActivity extends AppCompatActivity {
                     } else {
                         int newDevicesHeaderIndex = discoveredDevicesList.indexOf("--- 新设备 ---");
                         if (newDevicesHeaderIndex == -1) {
-                            // 理论上 startDiscovery() 应该已经添加了这个头部
-                            // (Theoretically, startDiscovery() should have added this header)
                             discoveredDevicesList.add("--- 新设备 ---");
-                            newDevicesHeaderIndex = discoveredDevicesList.size() -1; // 指向新添加的头部 (Points to the newly added header)
+                            newDevicesHeaderIndex = discoveredDevicesList.size() - 1;
                         }
-                        // 将新设备添加到 "--- 新设备 ---" 标题之后，或者如果标题是最后一个，则直接添加
-                        // (Add new device after "--- 新设备 ---" header, or directly if header is last)
+                        // 修复：检查是否可以安全访问 newDevicesHeaderIndex + 1
+                        if (newDevicesHeaderIndex + 1 < discoveredDevicesList.size() &&
+                                discoveredDevicesList.get(newDevicesHeaderIndex + 1).equals("未发现新设备")) {
+                            discoveredDevicesList.remove(newDevicesHeaderIndex + 1);
+                        }
                         discoveredDevicesList.add(deviceInfo);
                         listAdapter.notifyDataSetChanged();
                         Log.d(TAG, "发现新设备: " + deviceInfo);
@@ -429,12 +516,12 @@ public class MainActivity extends AppCompatActivity {
                 }
             } else if (BluetoothAdapter.ACTION_DISCOVERY_STARTED.equals(action)) {
                 Log.d(TAG, "Discovery started.");
-                binding.btnScan.setEnabled(false); // 扫描开始时禁用按钮 (Disable button when scan starts)
-                Log.d(TAG, "扫描按钮在 ACTION_DISCOVERY_STARTED 中被禁用 (Scan button disabled in ACTION_DISCOVERY_STARTED)");
+                binding.btnScan.setEnabled(false);
+                Log.d(TAG, "扫描按钮在 ACTION_DISCOVERY_STARTED 中被禁用");
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 Log.d(TAG, "Discovery finished.");
-                binding.btnScan.setEnabled(true);  // 扫描结束时启用按钮 (Enable button when scan finishes)
-                Log.d(TAG, "扫描按钮在 ACTION_DISCOVERY_FINISHED 中被启用 (Scan button enabled in ACTION_DISCOVERY_FINISHED)");
+                binding.btnScan.setEnabled(true);
+                Log.d(TAG, "扫描按钮在 ACTION_DISCOVERY_FINISHED 中被启用");
 
                 int deviceCount = countDevices();
                 long scanDuration = System.currentTimeMillis() - scanStartTime;
@@ -443,30 +530,72 @@ public class MainActivity extends AppCompatActivity {
                 showRescanDialog(deviceCount, minutes, seconds);
             }
         }
-    };
+    };  // end discoveryReceiver
+    /**
+     * 添加 null 检查：
+     * 使用 deviceIdentifier 变量存储最终显示的设备标识。
+     *默认使用 device.getAddress() 作为回退值。 如果有权限且 device.getName() 不为 null 且不为空，则使用设备名称。
+     * 确保消息清晰：
+     * 无论设备名称是否可用，Toast 消息都会显示有意义的设备标识（名称或地址），避免出现“设备null”的情况。
+     */
+    private final BroadcastReceiver bondStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            final String action = intent.getAction();
+
+            if (BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) {
+                BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (device == null) return;
+                final int bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                final int previousBondState = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR);
+
+                Log.d(TAG, "设备 " + device.getAddress() + " 绑定状态改变: " + previousBondState + " -> " + bondState);
+
+                if (bondState == BluetoothDevice.BOND_BONDED || bondState == BluetoothDevice.BOND_NONE) {
+                    // 修复：优先获取设备名称，若为 null 则使用设备地址
+                    String deviceIdentifier = device.getAddress(); // 默认使用地址
+                    if (checkPermission(getBluetoothConnectPermission())) {
+                        String deviceName = device.getName();
+                        if (deviceName != null && !deviceName.isEmpty()) {
+                            deviceIdentifier = deviceName;
+                        }
+                    }
+                    Toast.makeText(context, "设备 " + deviceIdentifier +
+                            (bondState == BluetoothDevice.BOND_BONDED ? " 已配对" : " 已取消配对"), Toast.LENGTH_SHORT).show();
+                    refreshDeviceListWithStatus();
+                }
+            }
+        }
+    }; //end BroadcastReceiver bondStateReceiver
 
     private int countDevices() {
         int count = 0;
         for (String item : discoveredDevicesList) {
-            if (!item.startsWith("---")) {
+            if (!item.startsWith("---") && !item.equals("无已配对设备") && !item.equals("未发现新设备")) {
                 count++;
             }
         }
         return count;
     }
 
+    @SuppressLint("DefaultLocale")
     private void showRescanDialog(int deviceCount, int minutes, int seconds) {
-        @SuppressLint("DefaultLocale") String message = String.format("扫描完成，共搜索到%d个设备，耗时%d分%d秒，是否重新扫描？",
-                deviceCount, minutes, seconds);
+        @SuppressLint("DefaultLocale") String message;
+        if (minutes == 0) {
+            message = String.format("扫描完成，共搜索到%d个设备，耗时%d秒，是否重新扫描？", deviceCount, seconds);
+        } else {
+            message = String.format("扫描完成，共搜索到%d个设备，耗时%d分%d秒，是否重新扫描？", deviceCount, minutes, seconds);
+        }
         new AlertDialog.Builder(this)
                 .setTitle("扫描完成")
                 .setMessage(message)
                 .setPositiveButton("重新扫描", (dialog, which) -> {
-                    if (checkAndRequestPermissions()) { // 再次检查权限以防万一 (Re-check permissions just in case)
+                    if (checkAndRequestPermissions()) {
                         startDiscovery();
                     }
                 })
                 .setNegativeButton("取消", null)
+                .setCancelable(false)
                 .show();
     }
 
@@ -478,21 +607,44 @@ public class MainActivity extends AppCompatActivity {
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? Manifest.permission.BLUETOOTH_CONNECT : Manifest.permission.BLUETOOTH;
     }
 
-    @SuppressLint("MissingPermission") // Permissions are checked at the start of this method
+    @SuppressLint("MissingPermission")
+    private void unpairDevice(BluetoothDevice device) {
+        if (!checkPermission(getBluetoothConnectPermission())) {
+            Toast.makeText(this, "缺少蓝牙连接权限以取消配对", Toast.LENGTH_SHORT).show();
+            Log.e(TAG, "unpairDevice: BLUETOOTH_CONNECT permission missing.");
+            return;
+        }
+        try {
+            Method method = device.getClass().getMethod("removeBond", (Class[]) null);
+            boolean success = (boolean) method.invoke(device, (Object[]) null);
+            if (success) {
+                Toast.makeText(this, "正在取消配对: " + (device.getName() != null ? device.getName() : device.getAddress()), Toast.LENGTH_SHORT).show();
+            } else {
+                Log.e(TAG, "removeBond() 调用返回 false for " + device.getAddress());
+                Toast.makeText(this, "取消配对 " + (device.getName() != null ? device.getName() : device.getAddress()) + " 失败", Toast.LENGTH_LONG).show();
+                refreshDeviceListWithStatus();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "取消配对失败 " + (device.getName() != null ? device.getName() : device.getAddress()), e);
+            Toast.makeText(this, "取消配对 " + (device.getName() != null ? device.getName() : device.getAddress()) + " 失败: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            refreshDeviceListWithStatus();
+        }
+    }
+
+    @SuppressLint("MissingPermission")
     public synchronized void connectToDevice(BluetoothDevice device) {
         if (!checkPermission(getBluetoothConnectPermission())) {
-            Toast.makeText(this,"缺少蓝牙连接权限，无法连接。", Toast.LENGTH_SHORT).show();
-            Log.e(TAG,"connectToDevice: BLUETOOTH_CONNECT permission missing.");
+            Toast.makeText(this, "缺少蓝牙连接权限，无法连接。", Toast.LENGTH_SHORT).show();
+            Log.e(TAG, "connectToDevice: BLUETOOTH_CONNECT permission missing.");
             return;
         }
 
-        String deviceNameForToast = device.getAddress(); // 默认使用地址 (Default to address)
-        String fetchedName = device.getName(); // 尝试获取名称 (Try to get name)
+        String deviceNameForToast = device.getAddress();
+        String fetchedName = device.getName();
         if (fetchedName != null && !fetchedName.isEmpty()) {
             deviceNameForToast = fetchedName;
         }
         Log.d(TAG, "connect to: " + deviceNameForToast + " (" + device.getAddress() + ")");
-
 
         if (connectThread != null) {
             connectThread.cancel();
@@ -507,14 +659,14 @@ public class MainActivity extends AppCompatActivity {
         updateConnectionState(ConnectionState.STATE_CONNECTING, deviceNameForToast);
     }
 
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is checked before calling getName or used with fallback
+    @SuppressLint("MissingPermission")
     private synchronized void manageConnectedSocket(BluetoothSocket socket, BluetoothDevice device) {
-        String deviceNameForState = device.getAddress(); // 默认 (Default)
+        String deviceNameForState = device.getAddress();
         String fetchedName = device.getName();
         if (fetchedName != null && !fetchedName.isEmpty()) {
             deviceNameForState = fetchedName;
         }
-        Log.d(TAG, "manageConnectedSocket 已为 " + deviceNameForState + " 启动 (manageConnectedSocket started for " + deviceNameForState + ")");
+        Log.d(TAG, "manageConnectedSocket 已为 " + deviceNameForState + " 启动");
 
         if (connectThread != null) {
             connectThread.cancel();
@@ -524,6 +676,8 @@ public class MainActivity extends AppCompatActivity {
             connectedThread.cancel();
             connectedThread = null;
         }
+
+        connectedDeviceAddress = device.getAddress();
         connectedThread = new ConnectedThread(socket);
         connectedThread.start();
 
@@ -531,35 +685,42 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private synchronized void updateConnectionState(int state, String deviceName) {
-        handler.obtainMessage(MessageConstants.MESSAGE_STATE_CHANGE, state, -1, deviceName).sendToTarget();
+        if (state == ConnectionState.STATE_NONE || state == ConnectionState.STATE_LISTEN) {
+            connectedDeviceAddress = null;
+        }
+        Message msg = handler.obtainMessage(MessageConstants.MESSAGE_STATE_CHANGE, state, -1, deviceName);
+        if (state == ConnectionState.STATE_NONE && deviceName == null) {
+            msg.obj = "连接已断开";
+        }
+        msg.sendToTarget();
     }
 
     private void connectionFailed() {
-        Log.e(TAG, "连接失败 (Connection Failed)");
+        Log.e(TAG, "连接失败");
         Message msg = handler.obtainMessage(MessageConstants.MESSAGE_TOAST);
         Bundle bundle = new Bundle();
-        bundle.putString("toast", "无法连接设备 (Unable to connect device)");
+        bundle.putString("toast", "无法连接设备");
         msg.setData(bundle);
         handler.sendMessage(msg);
         updateConnectionState(ConnectionState.STATE_NONE, null);
     }
 
     private void connectionLost() {
-        Log.e(TAG, "连接丢失 (Connection Lost)");
+        Log.e(TAG, "连接丢失");
         Message msg = handler.obtainMessage(MessageConstants.MESSAGE_TOAST);
         Bundle bundle = new Bundle();
-        bundle.putString("toast", "设备连接已丢失 (Device connection was lost)");
+        bundle.putString("toast", "设备连接已丢失");
         msg.setData(bundle);
         handler.sendMessage(msg);
         updateConnectionState(ConnectionState.STATE_NONE, null);
     }
 
-
-    @SuppressLint("MissingPermission") // Permissions are checked before discovery cancellation
+    @SuppressLint("MissingPermission")
     @Override
     protected void onDestroy() {
         super.onDestroy();
         unregisterReceiver(discoveryReceiver);
+        unregisterReceiver(bondStateReceiver);
         if (bluetoothAdapter != null && checkPermission(getBluetoothScanPermission())) {
             if (bluetoothAdapter.isDiscovering()) {
                 bluetoothAdapter.cancelDiscovery();
@@ -569,7 +730,7 @@ public class MainActivity extends AppCompatActivity {
         if (connectedThread != null) connectedThread.cancel();
     }
 
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is checked inside constructor
+    @SuppressLint("MissingPermission")
     private class ConnectThread extends Thread {
         private final BluetoothSocket mmSocket;
         private final BluetoothDevice mmDevice;
@@ -583,18 +744,21 @@ public class MainActivity extends AppCompatActivity {
                 }
                 tmp = device.createRfcommSocketToServiceRecord(MY_UUID);
             } catch (IOException e) {
-                Log.e(TAG, "ConnectThread: 套接字创建失败 (Socket creation failed)", e);
-                // 在构造函数中发生错误时，确保mmSocket为null，run()方法会处理
-                // (When error occurs in constructor, ensure mmSocket is null, run() will handle)
-                handler.post(MainActivity.this::connectionFailed); // 确保UI得到通知 (Ensure UI is notified)
+                Log.e(TAG, "ConnectThread: 套接字创建失败", e);
+                final String errorMsg = e.getMessage();
+                handler.post(() -> {
+                    if (errorMsg != null && errorMsg.contains("permission missing")) {
+                        Toast.makeText(MainActivity.this, "连接失败: 缺少蓝牙连接权限", Toast.LENGTH_LONG).show();
+                    }
+                    connectionFailed();
+                });
             }
             mmSocket = tmp;
         }
 
         public void run() {
-            if (mmSocket == null) { // 如果套接字创建失败 (If socket creation failed)
-                Log.e(TAG, "ConnectThread: mmSocket 为空，无法连接。可能由于权限或IO错误。(mmSocket is null, cannot connect. Possibly due to permission or IO error.)");
-                // connectionFailed() 应该已在构造函数中通过handler.post调用 (connectionFailed() should have been called via handler.post in constructor)
+            if (mmSocket == null) {
+                Log.e(TAG, "ConnectThread: mmSocket 为空，无法连接。");
                 return;
             }
             Log.i(TAG, "BEGIN mConnectThread, Device: " + mmDevice.getAddress());
@@ -604,18 +768,16 @@ public class MainActivity extends AppCompatActivity {
                 if (bluetoothAdapter.isDiscovering()) {
                     bluetoothAdapter.cancelDiscovery();
                 }
-            } else {
-                Log.w(TAG, "ConnectThread 中缺少扫描权限以取消发现。(Scan permission missing in ConnectThread to cancel discovery.)");
             }
 
             try {
                 mmSocket.connect();
             } catch (IOException e) {
-                Log.e(TAG, "ConnectThread: 连接失败 (Connection failed)", e);
+                Log.e(TAG, "ConnectThread: 连接失败", e);
                 try {
                     mmSocket.close();
                 } catch (IOException e2) {
-                    Log.e(TAG, "ConnectThread: 关闭套接字失败 (Failed to close socket)", e2);
+                    Log.e(TAG, "ConnectThread: 关闭套接字失败", e2);
                 }
                 connectionFailed();
                 return;
@@ -631,7 +793,7 @@ public class MainActivity extends AppCompatActivity {
             try {
                 if (mmSocket != null) mmSocket.close();
             } catch (IOException e) {
-                Log.e(TAG, "ConnectThread: 关闭套接字失败 (Failed to close socket)", e);
+                Log.e(TAG, "ConnectThread: 关闭套接字失败", e);
             }
         }
     }
@@ -640,10 +802,9 @@ public class MainActivity extends AppCompatActivity {
         private final BluetoothSocket mmSocket;
         private final InputStream mmInStream;
         private final OutputStream mmOutStream;
-        private byte[] mmBuffer;
 
         public ConnectedThread(BluetoothSocket socket) {
-            Log.d(TAG, "创建 ConnectedThread (Creating ConnectedThread)");
+            Log.d(TAG, "创建 ConnectedThread");
             mmSocket = socket;
             InputStream tmpIn = null;
             OutputStream tmpOut = null;
@@ -652,30 +813,35 @@ public class MainActivity extends AppCompatActivity {
                 tmpIn = socket.getInputStream();
                 tmpOut = socket.getOutputStream();
             } catch (IOException e) {
-                Log.e(TAG, "临时套接字未创建 (Temp sockets not created)", e);
+                Log.e(TAG, "临时套接字未创建", e);
             }
 
             mmInStream = tmpIn;
             mmOutStream = tmpOut;
             String remoteDeviceAddress = "UnknownDevice";
-            if (socket.getRemoteDevice() != null) {
-                remoteDeviceAddress = socket.getRemoteDevice().getAddress();
+            try {
+                if (socket.getRemoteDevice() != null) {
+                    remoteDeviceAddress = socket.getRemoteDevice().getAddress();
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Error getting remote device address in ConnectedThread constructor", e);
             }
             setName("ConnectedThread-" + remoteDeviceAddress);
         }
 
         public void run() {
             Log.i(TAG, "BEGIN mConnectedThread");
-            mmBuffer = new byte[1024];
+            byte[] mmBuffer = new byte[1024];
             int numBytes;
 
             while (mmSocket.isConnected()) {
                 try {
+                    if (mmInStream == null) throw new IOException("InputStream is null");
                     numBytes = mmInStream.read(mmBuffer);
                     Message readMsg = handler.obtainMessage(MessageConstants.MESSAGE_READ, numBytes, -1, mmBuffer.clone());
                     readMsg.sendToTarget();
                 } catch (IOException e) {
-                    Log.d(TAG, "输入流已断开 (Input stream was disconnected)", e);
+                    Log.d(TAG, "输入流已断开或读取错误", e);
                     connectionLost();
                     break;
                 }
@@ -685,19 +851,20 @@ public class MainActivity extends AppCompatActivity {
 
         public void write(byte[] bytes) {
             try {
+                if (mmOutStream == null) throw new IOException("OutputStream is null");
                 mmOutStream.write(bytes);
-                Log.d(TAG, "数据已发送 (Data sent): " + new String(bytes));
+                Log.d(TAG, "数据已发送: " + new String(bytes));
             } catch (IOException e) {
-                Log.e(TAG, "发送数据时发生错误 (Error occurred when sending data)", e);
+                Log.e(TAG, "发送数据时发生错误", e);
                 connectionLost();
             }
         }
 
         public void cancel() {
             try {
-                mmSocket.close();
+                if (mmSocket != null) mmSocket.close();
             } catch (IOException e) {
-                Log.e(TAG, "无法关闭连接套接字 (Could not close the connect socket)", e);
+                Log.e(TAG, "无法关闭连接套接字", e);
             }
         }
     }
