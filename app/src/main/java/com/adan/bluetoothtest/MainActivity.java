@@ -306,7 +306,7 @@ public class MainActivity extends AppCompatActivity {
                 String deviceName = device.getName();
                 String deviceHardwareAddress = device.getAddress();
                 String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(deviceHardwareAddress)) ? " (已连接)" : " (未连接)";
-                String deviceInfo = (deviceName == null || deviceName.isEmpty() ? "未知设备 (已配对)" : deviceName) + status + "\n" + deviceHardwareAddress;
+                String deviceInfo = (deviceName == null || deviceName.isEmpty() ? "未知设备" : deviceName) + status + "\n" + deviceHardwareAddress;
                 discoveredDevicesList.add(deviceInfo);
             }
         } else {
@@ -320,7 +320,9 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // 更新新设备部分
+    /**
+     * 删除了 status 变量的拼接，仅保留 name + "\n" + address。
+     */
     private void updateNewDevices(ArrayList<String> newDevices) {
         ArrayList<String> updatedNewDevices = new ArrayList<>();
         updatedNewDevices.add("--- 新设备 ---");
@@ -335,8 +337,8 @@ public class MainActivity extends AppCompatActivity {
             if (checkPermission(getBluetoothConnectPermission())) {
                 name = dev.getName() == null || dev.getName().isEmpty() ? "未知设备" : dev.getName();
             }
-            String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(address)) ? " (已连接)" : " (未连接)";
-            updatedNewDevices.add(name + status + "\n" + address);
+            // 优化：移除状态字符串，仅显示名称和地址
+            updatedNewDevices.add(name + "\n" + address);
         }
 
         if (updatedNewDevices.size() == 1) { // 只有标题，没有设备
@@ -351,7 +353,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         discoveredDevicesList.addAll(updatedNewDevices);
-    }
+    }  //end updateNewDevices
 
     private boolean checkAndRequestPermissions() {
         ArrayList<String> permissionsToRequest = new ArrayList<>();
@@ -452,13 +454,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * 添加边界检查：
-     * 在访问 discoveredDevicesList.get(newDevicesHeaderIndex + 1) 之前，添加条件 newDevicesHeaderIndex + 1 < discoveredDevicesList.size()，确保不会越界。
-     * 如果 newDevicesHeaderIndex 是最后一个元素，则跳过移除 "未发现新设备" 的操作，因为此时没有该项。
-     * <p>
-     * 逻辑优化：
-     * 确保 newDevicesHeaderIndex 后的操作更加健壮，避免不必要的列表访问。
-     * 简化了新设备添加的逻辑，减少出错可能性。
+     * deviceInfo 不再包含状态字符串，直接使用 deviceName + "\n" + deviceHardwareAddress。
      */
     private final BroadcastReceiver discoveryReceiver = new BroadcastReceiver() {
         @SuppressLint("MissingPermission")
@@ -469,7 +465,7 @@ public class MainActivity extends AppCompatActivity {
             if (BluetoothDevice.ACTION_FOUND.equals(action)) {
                 BluetoothDevice device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
                 if (device != null) {
-                    String deviceName = "未知设备 (扫描)";
+                    String deviceName = "未知设备";
                     String deviceHardwareAddress = device.getAddress();
 
                     if (checkPermission(getBluetoothConnectPermission())) {
@@ -479,8 +475,8 @@ public class MainActivity extends AppCompatActivity {
                         }
                     }
 
-                    String status = (connectedDeviceAddress != null && connectedDeviceAddress.equals(deviceHardwareAddress)) ? " (已连接)" : " (未连接)";
-                    String deviceInfo = deviceName + status + "\n" + deviceHardwareAddress;
+                    // 优化：新设备不显示状态字符串
+                    String deviceInfo = deviceName + "\n" + deviceHardwareAddress;
 
                     boolean alreadyExists = false;
                     int existingIndex = -1;
@@ -504,7 +500,6 @@ public class MainActivity extends AppCompatActivity {
                             discoveredDevicesList.add("--- 新设备 ---");
                             newDevicesHeaderIndex = discoveredDevicesList.size() - 1;
                         }
-                        // 修复：检查是否可以安全访问 newDevicesHeaderIndex + 1
                         if (newDevicesHeaderIndex + 1 < discoveredDevicesList.size() &&
                                 discoveredDevicesList.get(newDevicesHeaderIndex + 1).equals("未发现新设备")) {
                             discoveredDevicesList.remove(newDevicesHeaderIndex + 1);
