@@ -23,9 +23,7 @@ import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 import android.view.LayoutInflater;
-import android.view.View;
 import android.widget.ArrayAdapter;
-import android.widget.AdapterView;
 import android.widget.Toast;
 
 import com.adan.bluetoothtest.databinding.ActivityMainBinding;
@@ -156,7 +154,6 @@ public class MainActivity extends AppCompatActivity {
             connectToDevice(device);
         });
 
-        // 设置扫描按钮点击事件
         binding.btnScan.setOnClickListener(v -> {
             Log.d(TAG, "扫描按钮被点击");
             if (checkAndRequestPermissions()) {
@@ -299,22 +296,18 @@ public class MainActivity extends AppCompatActivity {
         discoveredDevicesList.clear();
         discoveredDevicesList.addAll(tempPairedInfo);
 
-        // 禁用扫描按钮
-        binding.btnScan.setEnabled(false);
+        binding.btnScan.setEnabled(false);  // 禁用扫描按钮
 
         boolean discoveryStarted = bluetoothAdapter.startDiscovery();
         if (discoveryStarted) {
-            Toast.makeText(this, "正在扫描新设备...", Toast.LENGTH_SHORT).show();
             Log.d(TAG, "开始扫描新设备...");
             if (!discoveredDevicesList.contains("--- 新设备 ---")) {
                 discoveredDevicesList.add("--- 新设备 ---");
             }
             listAdapter.notifyDataSetChanged();
         } else {
-            Toast.makeText(this, "启动发现失败。", Toast.LENGTH_SHORT).show();
             Log.e(TAG, "BluetoothAdapter.startDiscovery() 返回 false。请检查权限和适配器状态。");
-            // 如果扫描失败，启用按钮以便用户重试
-            binding.btnScan.setEnabled(true);
+            binding.btnScan.setEnabled(true);  // 启用按钮以便用户重试
         }
     }
 
@@ -368,20 +361,30 @@ public class MainActivity extends AppCompatActivity {
                 Log.d(TAG, "Discovery started.");
             } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action)) {
                 Log.d(TAG, "Discovery finished.");
-                Toast.makeText(context, "扫描完成。", Toast.LENGTH_SHORT).show();
-                // 启用扫描按钮
-                binding.btnScan.setEnabled(true);
-                // 显示重新扫描提示框
-                showRescanDialog();
+                binding.btnScan.setEnabled(true);  // 启用扫描按钮
+                int deviceCount = countDevices();
+                showRescanDialog(deviceCount);
             }
         }
     };
 
-    // 显示重新扫描提示框
-    private void showRescanDialog() {
+    // 统计设备数量（不包括标题行）
+    private int countDevices() {
+        int count = 0;
+        for (String item : discoveredDevicesList) {
+            if (!item.startsWith("---")) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    // 显示重新扫描提示框，包含设备数量
+    private void showRescanDialog(int deviceCount) {
+        String message = "已经扫描完成，共搜索到 " + deviceCount + " 个蓝牙设备，是否重新扫描？";
         new AlertDialog.Builder(this)
                 .setTitle("扫描完成")
-                .setMessage("已经扫描完成，是否重新扫描？")
+                .setMessage(message)
                 .setPositiveButton("重新扫描", (dialog, which) -> startDiscovery())
                 .setNegativeButton("取消", null)
                 .show();
