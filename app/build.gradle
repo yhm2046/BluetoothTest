@@ -3,12 +3,13 @@ plugins {
 }
 
 android {
-    compileSdk 29
+    namespace 'com.adan.bluetoothtest'
+    compileSdk 30
 
     defaultConfig {
         applicationId "com.adan.bluetoothtest"
         minSdk 27
-        targetSdk 29
+        targetSdk 33
         versionCode 1
         versionName "1.0"
 
@@ -24,8 +25,8 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }
 

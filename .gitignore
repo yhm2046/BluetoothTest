@@ -1,15 +1,38 @@
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+/.idea/
+.gradle/
+build/
+
+# Local configuration files that should not be shared
 local.properties
+
+# macOS specific files
+.DS_Store
+
+# Build artifacts and other generated files
+/captures/
+.externalNativeBuild/
+.cxx/
+
+# Editor backup files (common pattern)
+*~
+*.swp
+*.swo
+
+# Keystore files (if you store them in the project, which is not always recommended for production)
+# *.jks
+# *.keystore
+
+# Google Services (if you download them directly and don't want to commit if they contain sensitive info, though usually committed)
+# google-services.json
+
+# Firebase Crashlytics generated files
+/app/build/generated/crashlytics/
+/app/build/reports/crashlytics/
+
+# Android Studio Profiler anaylsis files
+*.hprof
+*.snapshot
+
+# Log files
+*.log
